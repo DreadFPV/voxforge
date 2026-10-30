@@ -1,0 +1,8 @@
+build/
+cmake-build-*/
+dist/
+pkgroot/
+*.wav
+.DS_Store
+.vscode/
+.idea/

@@ -1,0 +1,84 @@
+name: Build macOS (VST3 + AU)
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache JUCE
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: juce-8.0.4-${{ runner.os }}
+
+      - name: Configure (universal arm64 + x86_64)
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+
+      - name: Build
+        run: cmake --build build --config Release --target VoxForge_VST3 VoxForge_AU VoxForgeTests -j 4
+
+      - name: Offline DSP tests
+        run: |
+          mkdir -p test-audio && cd test-audio
+          ../build/VoxForgeTests
+
+      - name: Ad-hoc sign
+        run: |
+          ART=build/VoxForge_artefacts/Release
+          codesign --force --deep --sign - "$ART/VST3/VoxForge.vst3"
+          codesign --force --deep --sign - "$ART/AU/VoxForge.component"
+
+      - name: Validate AU (auval)
+        run: |
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          cp -R build/VoxForge_artefacts/Release/AU/VoxForge.component ~/Library/Audio/Plug-Ins/Components/
+          killall -9 AudioComponentRegistrar || true
+          sleep 3
+          auval -a | grep -i voxforge || true
+          auval -strict -v aumf Vxfg Jcit
+
+      - name: Validate VST3 (pluginval)
+        run: |
+          curl -sSL -o pluginval.zip https://github.com/Tracktion/pluginval/releases/download/v1.0.4/pluginval_macOS.zip
+          unzip -q pluginval.zip
+          ./pluginval.app/Contents/MacOS/pluginval --strictness-level 5 --skip-gui-tests --validate-in-process \
+            --validate build/VoxForge_artefacts/Release/VST3/VoxForge.vst3
+
+      - name: Package (zip + installer)
+        run: |
+          ART=build/VoxForge_artefacts/Release
+          VER=$(grep -m1 'project(VoxForge VERSION' CMakeLists.txt | sed -E 's/.*VERSION ([0-9.]+).*/\1/')
+          mkdir -p dist pkgroot/Library/Audio/Plug-Ins/VST3 pkgroot/Library/Audio/Plug-Ins/Components
+          cp -R "$ART/VST3/VoxForge.vst3" pkgroot/Library/Audio/Plug-Ins/VST3/
+          cp -R "$ART/AU/VoxForge.component" pkgroot/Library/Audio/Plug-Ins/Components/
+          pkgbuild --root pkgroot --identifier ch.justcreateit.voxforge --version "$VER" --install-location / "dist/VoxForge-$VER-macOS.pkg"
+          (cd "$ART/VST3" && ditto -c -k --keepParent VoxForge.vst3 "$GITHUB_WORKSPACE/dist/VoxForge-$VER-VST3-macOS.zip")
+          (cd "$ART/AU" && ditto -c -k --keepParent VoxForge.component "$GITHUB_WORKSPACE/dist/VoxForge-$VER-AU-macOS.zip")
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VoxForge-macOS
+          path: dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: test-audio
+          path: test-audio/*.wav
+
+      - name: Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
